@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"net"
+	"strings"
 )
 
 type User struct {
@@ -39,7 +41,7 @@ func (user *User) Online() {
 		user.server.mapLock.Unlock()
 	
 		// broad cast user online msg to all online users
-		user.SendMessage("is online")
+		user.SendBroadCastMessage("is online")
 }
 
 func (user *User) Offline() {
@@ -49,11 +51,33 @@ func (user *User) Offline() {
 	user.server.mapLock.Unlock()
 
 	// broad cast user offline msg to all online users
-	user.SendMessage("is offline")
+	user.SendBroadCastMessage("is offline")
+
+	// close sources
+	user.conn.Close()
+	close(user.Chan)
 }
 
-func (user *User) SendMessage(msg string) {
+func (user *User) HandleReceiveClientMessage(msg string) {
+	if msg == "who" {
+		// show online users' info to the user
+		onlineUsers := user.server.ShowOnlineUsers()
+		user.SendMessageToClient(fmt.Sprintf("%v", onlineUsers))
+	} else if len(msg) > 7 && msg[:7] == "rename:" {
+		// rename user
+		newName := strings.Split(msg, ":")[1]
+		user.server.RenameUser(user, newName)
+	} else {
+		user.SendBroadCastMessage(msg)
+	}
+}
+
+func (user *User) SendBroadCastMessage(msg string) {
 	user.server.PutBroadCastMessage(user, msg)
+}
+
+func (user *User) SendMessageToClient(msg string) {
+	user.conn.Write([]byte(msg + "\n"))
 }
 
 // listen user channel, send message to user client when message comes
@@ -61,6 +85,6 @@ func (user *User) ReceiveServerMessage() {
 	for {
 		msg := <- user.Chan
 
-		user.conn.Write([]byte(msg + "\n"))
+		user.SendMessageToClient(msg)
 	}
 }

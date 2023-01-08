@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"sync"
+	"time"
 )
 
 type Server struct {
@@ -25,7 +27,7 @@ func NewServer(ip string, port int) *Server {
 		Ip:   ip,
 		Port: port,
 
-		OnlineUserMap: make(map[string]*User),
+		OnlineUserMap:     make(map[string]*User),
 		ServerMessageChan: make(chan string),
 	}
 
@@ -64,38 +66,51 @@ func (server *Server) HandleConnection(conn net.Conn) {
 
 	user.Online()
 
-	// receive msg sent by user
-	buf := make([]byte, 4096)
-	for {
-		len, err := conn.Read(buf)
-		if len == 0 {
-			user.Offline()
-			return
-		}
+	isAlive := make(chan bool)
 
-		// there's a io.EOF flag when reading to a message's end
-		if err != nil && err != io.EOF {
-			fmt.Println("net.Conn Read err: ", err)
-			user.Offline()
-			return
-		}
+	go func() {
+		// receive msg sent by user
+		buf := make([]byte, 4096)
 
-		msg := string(buf[: len - 1])
-		// put msg to broad cast chan
-		user.SendMessage(msg)
-	}
+		needToClose := false
+
+		for {
+			len, err := conn.Read(buf)
+
+			if len == 0 {
+				needToClose = true
+			} else if err != nil && err != io.EOF { // there's a io.EOF flag when the client conn's write channel is closed
+				fmt.Println("net.Conn Read err: ", err)
+				needToClose = true
+			}
+
+			if needToClose {
+				runtime.Goexit()
+			}
+
+			msg := string(buf[:len-1])
+			// handle receive msg from client
+			user.HandleReceiveClientMessage(msg)
+
+			// set alive at each message receiving option
+			isAlive <- true
+		}
+	}()
+
+	// kick out when not alive for a setting time
+	server.KickOutAfterTime(user, isAlive, 300)
 }
 
 func (server *Server) PutBroadCastMessage(sender *User, msg string) {
 	sendMsg := "[" + sender.Addr + "]" + sender.Name + ": " + msg
-	
+
 	// put msg to broad cast message chan
 	server.ServerMessageChan <- sendMsg
 }
 
 func (server *Server) BroadCastMessage() {
 	for {
-		msg := <- server.ServerMessageChan
+		msg := <-server.ServerMessageChan
 
 		// send msg to all online users' chan
 		server.mapLock.RLock()
@@ -103,5 +118,44 @@ func (server *Server) BroadCastMessage() {
 			user.Chan <- msg
 		}
 		server.mapLock.RUnlock()
+	}
+}
+
+func (server *Server) ShowOnlineUsers() []string {
+	onlineUsers := make([]string, 0)
+
+	server.mapLock.RLock()
+	for name := range server.OnlineUserMap {
+		onlineUsers = append(onlineUsers, name)
+	}
+	server.mapLock.RUnlock()
+
+	return onlineUsers
+}
+
+func (server *Server) RenameUser(user *User, newName string) {
+	server.mapLock.Lock()
+	_, contains := server.OnlineUserMap[newName]
+	if contains {
+		user.SendMessageToClient("the name has been used")
+	} else {
+		delete(server.OnlineUserMap, user.Name)
+		user.Name = newName
+		server.OnlineUserMap[newName] = user
+	}
+	server.mapLock.Unlock()
+}
+
+func (server *Server) KickOutAfterTime(user *User, isAlive chan bool, seconds int) {
+	for {
+		select {
+		case <-isAlive:
+			// do nothing
+		case <-time.After(time.Second * time.Duration(seconds)):
+			user.SendMessageToClient("you are kick out(not alive for long)")
+			user.Offline()
+
+			runtime.Goexit()
+		}
 	}
 }
